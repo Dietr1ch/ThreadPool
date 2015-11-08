@@ -1,5 +1,4 @@
-#ifndef CONCURRENT_THREADPOOL_H
-#define CONCURRENT_THREADPOOL_H
+#pragma once
 
 #include <atomic>
 #include <thread>
@@ -12,6 +11,21 @@
 namespace nbsdx {
 namespace concurrent {
 
+  using std::array;
+  using std::list;
+  using std::move;
+
+  using std::atomic_bool;
+  using std::atomic_int;
+  using std::condition_variable;
+  using std::lock_guard;
+  using std::mutex;
+  using std::unique_lock;
+  using std::thread;
+
+  typedef std::function<auto (void)->void > Job;
+
+
 /**
  *  Simple ThreadPool that creates `ThreadCount` threads upon its creation,
  *  and pulls from a queue to get new jobs. The default is 10 threads.
@@ -20,18 +34,18 @@ namespace concurrent {
  */
 template <unsigned ThreadCount = 10>
 class ThreadPool {
-    
-    std::array<std::thread, ThreadCount> threads;
-    std::list<std::function<void(void)>> queue;
 
-    std::atomic_int         jobs_left;
-    std::atomic_bool        bailout;
-    std::atomic_bool        finished;
-    std::condition_variable job_available_var;
-    std::condition_variable wait_var;
-    std::mutex              job_available_mutex;
-    std::mutex              wait_mutex;
-    std::mutex              queue_mutex;
+    array<thread, ThreadCount> threads;
+    list<Job> queue;
+
+    atomic_int         jobs_left;
+    atomic_bool        bailout;
+    atomic_bool        finished;
+    condition_variable job_available_var;
+    condition_variable wait_var;
+    mutex              job_available_mutex;
+    mutex              wait_mutex;
+    mutex              queue_mutex;
 
     /**
      *  Take the next job in the queue and run it.
@@ -46,12 +60,12 @@ class ThreadPool {
     }
 
     /**
-     *  Get the next job; pop the first item in the queue, 
+     *  Get the next job; pop the first item in the queue,
      *  otherwise wait for a signal from the main thread.
      */
-    std::function<void(void)> next_job() {
-        std::function<void(void)> res;
-        std::unique_lock<std::mutex> job_lock( job_available_mutex );
+    Job next_job() {
+        Job res;
+        unique_lock<mutex> job_lock( job_available_mutex );
         queue_mutex.lock();
 
         // Get job from the queue
@@ -62,7 +76,7 @@ class ThreadPool {
         else { // Wait for a notification from the main thread.
             queue_mutex.unlock();
             job_available_var.wait( job_lock, [this]{ return (JobsRemaining()) || bailout; } );
-            
+
             queue_mutex.lock();
             if( !bailout ) {
                 res = queue.front();
@@ -83,10 +97,10 @@ public:
     ThreadPool()
         : jobs_left( 0 )
         , bailout( false )
-        , finished( false ) 
+        , finished( false )
     {
         for( unsigned i = 0; i < ThreadCount; ++i )
-            threads[ i ] = std::move( std::thread( [this,i]{ this->Task(); } ) );
+            threads[ i ] = move( thread( [this,i]{ this->Task(); } ) );
     }
 
     /**
@@ -107,7 +121,7 @@ public:
      *  Get the number of jobs left in the queue.
      */
     inline unsigned JobsRemaining() {
-        std::lock_guard<std::mutex> guard( queue_mutex );
+        lock_guard<mutex> guard( queue_mutex );
         return queue.size();
     }
 
@@ -116,8 +130,8 @@ public:
      *  a thread is woken up to take the job. If all threads are busy,
      *  the job is added to the end of the queue.
      */
-    void AddJob( std::function<void(void)> job ) {
-        std::lock_guard<std::mutex> guard( queue_mutex );
+    void AddJob( Job job ) {
+        lock_guard<mutex> guard( queue_mutex );
         queue.emplace_back( job );
         ++jobs_left;
         job_available_var.notify_one();
@@ -125,7 +139,7 @@ public:
 
     /**
      *  Join with all threads. Block until all threads have completed.
-     *  Params: WaitForAll: If true, will wait for the queue to empty 
+     *  Params: WaitForAll: If true, will wait for the queue to empty
      *          before joining with threads. If false, will complete
      *          current jobs, then inform the threads to exit.
      *  The queue will be empty after this call, and the threads will
@@ -152,13 +166,13 @@ public:
     }
 
     /**
-     *  Wait for the pool to empty before continuing. 
-     *  This does not call `std::thread::join`, it only waits until
+     *  Wait for the pool to empty before continuing.
+     *  This does not call `thread::join`, it only waits until
      *  all jobs have finshed executing.
      */
     void WaitAll() {
         if( jobs_left > 0 ) {
-            std::unique_lock<std::mutex> lk( wait_mutex );
+            unique_lock<mutex> lk( wait_mutex );
             wait_var.wait( lk, [this]{ return this->jobs_left == 0; } );
             lk.unlock();
         }
@@ -167,5 +181,3 @@ public:
 
 } // namespace concurrent
 } // namespace nbsdx
-
-#endif //CONCURRENT_THREADPOOL_H
